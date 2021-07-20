@@ -51,7 +51,7 @@ class Entry(NamedTuple):
 
     @classmethod
     def new(cls: Type[T], pathname: Path, oid: str, stat: stat_result) -> T:
-        """Create a new entry object."""
+        """Create a new entry."""
         # Check if user has permissions to execute the file
         mode = REGULAR_MODE if stat.st_mode & 0o000100 == 0 else EXECUTABLE_MODE
 
@@ -84,9 +84,7 @@ class Entry(NamedTuple):
 
     @classmethod
     def parse(cls: Type[T], binary: bytes) -> T:
-        """
-        Parse a binary representation of entry.
-        """
+        """Parse a binary representation of an entry into an object."""
         with BytesIO(binary) as bio:
             (
                 ctime,
