@@ -8,7 +8,7 @@ from typing import BinaryIO, Dict, Optional, Tuple
 from lockfile import Lockfile
 
 from .checksum import Checksum
-from .entry import Entry
+from .entry import Entry, ENTRY_BLOCK, ENTRY_MIN_SIZE
 
 
 class Index:
@@ -30,7 +30,7 @@ class Index:
         """Queue entries for writing to index."""
         if not oid:
             raise Exception(f"Null OID for {pathname}")
-        entry: Entry = Entry(pathname, oid, stat)
+        entry: Entry = Entry.new(pathname, oid, stat)
         self.store_entry(entry)
         self.changed = True
 
@@ -76,13 +76,14 @@ class Index:
     def read_header(self, reader: Checksum) -> int:
         """Read the header from the index."""
         data = reader.read(self.HEADER_SIZE)
-        (signature, version, count) = struct.unpack(
+        (sig_bytes, version, count) = struct.unpack(
             self.HEADER_FORMAT, data
         )  # type: Tuple[bytes, int, int]
+        signature = sig_bytes.decode("utf-8")
 
         if str(signature) != self.SIGNATURE:
             raise Exception(
-                f"Signature: expected '{self.SIGNATURE}' but found '{str(signature)}'"
+                f"Signature: expected '{self.SIGNATURE}' but found '{signature}'"
             )
         elif version != self.VERSION:
             raise Exception(
@@ -99,12 +100,12 @@ class Index:
         """Read entries from index and load them into memory."""
         for c in range(0, count):
             # Read the minimum size that an entry could be
-            entry: bytes = reader.read(Entry.ENTRY_MIN_SIZE)
+            entry: bytes = reader.read(ENTRY_MIN_SIZE)
 
             # Keep reading until reaching a null byte
             while entry[-1] != 0:
                 # Entries are multiples of 8 bytes, so read 8 bytes at a time
-                entry = entry + reader.read(Entry.ENTRY_BLOCK)
+                entry = entry + reader.read(ENTRY_BLOCK)
 
             self.store_entry(Entry.parse(entry))
 

@@ -1,107 +1,141 @@
 import struct
-from math import modf
+from io import BytesIO
 from os import stat_result
+from typing import Final, NamedTuple, Type, TypeVar
 from pathlib import Path
-from typing import Final, List, Optional, Tuple, TypeVar, Type
+
+REGULAR_MODE = 0o100644
+EXECUTABLE_MODE = 0o100755
+
+MAX_PATH_SIZE = 0xFFF
+
+ENTRY_BLOCK = 8
+ENTRY_MIN_SIZE = 64
+ENTRY_FORMAT = ">10I20sH"
 
 T = TypeVar("T", bound="Entry")
 
 
-class Entry:
-    REGULAR_MODE: Final = 0o100644
-    EXECUTABLE_MODE: Final = 0o100755
-    MAX_PATH_SIZE: Final = 0xFFF
-    ENTRY_BLOCK: Final = 8
-    ENTRY_MIN_SIZE: Final = 64
-    ENTRY_FORMAT: Final = ">10I20sH%dsx"
+class Entry(NamedTuple):
+    """
+    Represents an entry in the index.
 
-    def __init__(
-        self, pathname: Path, oid: str, stat: Optional[stat_result] = None
-    ) -> None:
-        self.pathname: Path = pathname
-        self.oid: str = oid
-        if stat:
-            # Check if user has permissions to execute the file
-            if stat.st_mode & 0o000100 != 0:
-                self.mode: int = self.EXECUTABLE_MODE
-            else:
-                self.mode = self.REGULAR_MODE
+    32-bit ctime
+    32-bit ctime_ns
+    32-bit mtime
+    32-bit mtime_ns
+    32-bit dev
+    32-bit ino
+    32-bit mode
+    32-bit uid
+    32-bit gid
+    32-bit file size
+    160-bit SHA-1
+    16-bit flags
+    Null character
+    """
 
-            # Contains length of path or a maximum length
-            self.flags = min([len(bytes(pathname)), self.MAX_PATH_SIZE])
+    pathname: Path
+    oid: str
+    mode: int
+    flags: int
+    ctime: int
+    ctime_ns: int
+    mtime: int
+    mtime_ns: int
+    dev: int
+    ino: int
+    uid: int
+    gid: int
+    size: int
 
-            # TODO may not match behavior on Windows
-            # Time in seconds and nanoseconds
-            # The value encoded for *_ns needs to exclude the seconds
-            self.ctime: int = int(stat.st_ctime)
-            self.ctime_ns: int = stat.st_ctime_ns - int(self.ctime * 1e9)
-            self.mtime: int = int(stat.st_mtime)
-            self.mtime_ns: int = stat.st_mtime_ns - int(self.ctime * 1e9)
+    @classmethod
+    def new(cls: Type[T], pathname: Path, oid: str, stat: stat_result) -> T:
+        """Create a new entry object."""
+        # Check if user has permissions to execute the file
+        mode = REGULAR_MODE if stat.st_mode & 0o000100 == 0 else EXECUTABLE_MODE
 
-            self.dev: int = stat.st_dev
-            self.ino: int = stat.st_ino
-            self.uid: int = stat.st_uid
-            self.gid: int = stat.st_gid
-            self.size: int = stat.st_size
+        # Contains length of path or a maximum length
+        flags = min([len(bytes(pathname)), MAX_PATH_SIZE])
+
+        # TODO may not match behavior on Windows
+        # Time in seconds and nanoseconds
+        # The value encoded for *_ns needs to exclude the seconds
+        ctime = int(stat.st_ctime)
+        ctime_ns = stat.st_ctime_ns - int(ctime * 1e9)
+        mtime = int(stat.st_mtime)
+        mtime_ns = stat.st_mtime_ns - int(mtime * 1e9)
+
+        return cls(
+            pathname=pathname,
+            oid=oid,
+            mode=mode,
+            flags=flags,
+            ctime=ctime,
+            ctime_ns=ctime_ns,
+            mtime=mtime,
+            mtime_ns=mtime_ns,
+            dev=stat.st_dev,
+            ino=stat.st_ino,
+            uid=stat.st_uid,
+            gid=stat.st_gid,
+            size=stat.st_size,
+        )
 
     @classmethod
     def parse(cls: Type[T], binary: bytes) -> T:
-        """Parse a binary representation of entry."""
-        # First need to find out length of the path
-        # Fortunately, we know where this gets stored
-        path_len: int = binary[61]
+        """
+        Parse a binary representation of entry.
+        """
+        with BytesIO(binary) as bio:
+            (
+                ctime,
+                ctime_ns,
+                mtime,
+                mtime_ns,
+                dev,
+                ino,
+                mode,
+                uid,
+                gid,
+                size,
+                hex_oid,
+                flags,
+            ) = struct.unpack(ENTRY_FORMAT, bio.read(62))
 
-        # Define encoding, dynamically setting length of path array
-        encoding: str = cls.ENTRY_FORMAT % (path_len,)
+            # Read variable-length path until null
+            path = b"".join(iter(lambda: bio.read(1), b"\0")).decode("utf-8")
 
-        # Unpack values from binary
-        (
-            ctime,
-            ctime_ns,
-            mtime,
-            mtime_ns,
-            dev,
-            ino,
-            mode,
-            uid,
-            gid,
-            size,
-            oid,
-            flags,
-            path,
-        ) = struct.unpack(encoding, binary)
+        # Perform additional processing
+        pathname: Path = Path(path)
+        oid: str = hex_oid.hex()
 
-        # Define new class
-        c: T = cls(Path(path), oid.hex())
-        c.ctime = ctime
-        c.ctime_ns = ctime_ns
-        c.mtime = mtime
-        c.mtime_ns = mtime_ns
-        c.dev = dev
-        c.ino = ino
-        c.mode = mode
-        c.uid = uid
-        c.gid = gid
-        c.size = size
-        c.oid = oid
-        c.flags = flags
-
-        return c
+        return cls(
+            pathname=pathname,
+            oid=oid,
+            mode=mode,
+            flags=flags,
+            ctime=ctime,
+            ctime_ns=ctime_ns,
+            mtime=mtime,
+            mtime_ns=mtime_ns,
+            dev=dev,
+            ino=ino,
+            uid=uid,
+            gid=gid,
+            size=size,
+        )
 
     def __bytes__(self) -> bytes:
         """Return binary representation of entry."""
+
+        # Perform preprocessing
         bin_path: bytes = bytes(self.pathname)
         bin_oid: bytes = bytes.fromhex(self.oid[:40])
 
-        # Format for storing entry in the index:
-        # - 10 32-bit unsigned big-endian integers (derived from stat)
-        # - 40-character hex string packed into 20 bytes (oid)
-        # - 16-bit unsigned big-endian integer (flags)
-        # - Variable-length path
-        # - null-terminated
+        # Pack values whose length is known
         s = struct.pack(
-            # Define encoding, dynamically setting length of path array
-            self.ENTRY_FORMAT % (len(bin_path),),
+            ENTRY_FORMAT,
             self.ctime,
             self.ctime_ns,
             self.mtime,
@@ -114,11 +148,20 @@ class Entry:
             self.size,
             bin_oid,
             self.flags,
-            bin_path,
         )
 
-        # Pad to a multiple of ENTRY_BLOCK
-        while len(s) % self.ENTRY_BLOCK != 0:
-            s += b"\0"
+        with BytesIO() as bio:
+            # Write values whose length is known
+            bio.write(s)
 
-        return s
+            # Write variable-length path
+            bio.write(bin_path)
+
+            # Need a null character
+            bio.write(b"\0")
+
+            # Pad to a multiple of ENTRY_BLOCK
+            while len(bio.getvalue()) % ENTRY_BLOCK != 0:
+                bio.write(b"\0")
+
+            return bio.getvalue()
